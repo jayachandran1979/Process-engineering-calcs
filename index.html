@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Process Hydraulic Calculator (Beggs-Brill Included)</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script lang="javascript" src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
+
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f1f5f9; }
+        .input-group label { display: block; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; color: #64748b; margin-bottom: 0.25rem; }
+        .input-group input, .input-group select { width: 100%; border: 1px solid #cbd5e1; border-radius: 0.375rem; padding: 0.4rem 0.6rem; font-size: 0.875rem; transition: all 0.2s; }
+        .input-group input:focus, .input-group select:focus { border-color: #3b82f6; outline: none; box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        // --- GUIDELINES DATABASE ---
+        const GUIDELINES = {
+            "General Liquid": { min_v: 3, max_v: 10, max_dp: 1.0, type: "Liquid", src: "GPSA Sec 10", link: "https://gpsa.gpaglobal.org/", reason_v: "Balance pipe cost vs surge risks.", reason_dp: "Standard economic balance." },
+            "Pump Suction": { min_v: 1, max_v: 4, max_dp: 0.25, type: "Liquid", src: "Hydraulic Inst.", link: "https://www.pumps.org/", reason_v: "Prevent cavitation (NPSH).", reason_dp: "Maximize NPSHa." },
+            "Pump Discharge": { min_v: 4, max_v: 12, max_dp: 1.5, type: "Liquid", src: "GPSA Sec 10", link: "https://gpsa.gpaglobal.org/", reason_v: "Higher velocity allowed downstream.", reason_dp: "Fluid is pressurized." },
+            "Cooling Water": { min_v: 5, max_v: 10, max_dp: 1.0, type: "Liquid", src: "GPSA Sec 10", link: "https://gpsa.gpaglobal.org/", reason_v: "Prevent silt deposition (>3 ft/s).", reason_dp: "Pump head availability." },
+            "Boiler Feed Water": { min_v: 8, max_v: 15, max_dp: 2.5, type: "Liquid", src: "GPSA Sec 10", link: "https://gpsa.gpaglobal.org/", reason_v: "Clean fluid, low erosion risk.", reason_dp: "High pressure system." },
+            "General Gas": { min_v: 20, max_v: 80, max_dp: 0.5, type: "Gas", src: "GPSA Sec 10", link: "https://gpsa.gpaglobal.org/", reason_v: "Control noise/vibration.", reason_dp: "Gas density is low." },
+            "Compressor Suction": { min_v: 30, max_v: 60, max_dp: 0.2, type: "Gas", src: "API 618", link: "https://www.api.org/", reason_v: "Maximize compressor capacity.", reason_dp: "Strict dP limit (< 1% P)." },
+            "Compressor Discharge": { min_v: 40, max_v: 100, max_dp: 1.0, type: "Gas", src: "GPSA Sec 10", link: "https://gpsa.gpaglobal.org/", reason_v: "Limited by noise/pulsation.", reason_dp: "Economic HP balance." },
+            "Steam (Saturated)": { min_v: 50, max_v: 100, max_dp: 0.5, type: "Gas", src: "GPSA Sec 10", link: "https://gpsa.gpaglobal.org/", reason_v: "Erosion from droplets.", reason_dp: "Avoid temp drop." },
+            "Steam (Superheated)": { min_v: 100, max_v: 200, max_dp: 1.0, type: "Gas", src: "GPSA Sec 10", link: "https://gpsa.gpaglobal.org/", reason_v: "Dry gas, high velocity ok.", reason_dp: "High energy fluid." },
+            "Two-Phase General": { min_v: 10, max_v: 50, max_dp: 1.0, type: "Mix", src: "API RP 14E", link: "https://www.api.org/", reason_v: "Avoid slugging.", reason_dp: "System stability." }
+        };
+
+        const PIPE_DATA = {
+            "0.5": { "40": 0.622, "80": 0.546, "XXS": 0.252 },
+            "0.75": { "40": 0.824, "80": 0.742, "XXS": 0.434 },
+            "1": { "40": 1.049, "80": 0.957, "XXS": 0.599 },
+            "1.5": { "40": 1.610, "80": 1.500, "XXS": 1.100 },
+            "2": { "40": 2.067, "80": 1.939, "XXS": 1.503 },
+            "3": { "40": 3.068, "80": 2.900, "XXS": 2.300 },
+            "4": { "40": 4.026, "80": 3.826, "XXS": 3.152 },
+            "6": { "40": 6.065, "80": 5.761, "XXS": 4.897 },
+            "8": { "40": 7.981, "80": 7.625, "XXS": 6.875 },
+            "10": { "40": 10.020, "80": 9.750, "XXS": 8.750 },
+            "12": { "40": 12.000, "80": 11.750, "XXS": 10.750 },
+            "14": { "40": 13.250, "80": 12.500 },
+            "16": { "40": 15.250, "80": 14.312 },
+            "18": { "40": 17.250, "80": 16.124 },
+            "20": { "40": 19.250, "80": 17.938 },
+            "24": { "40": 23.250, "80": 21.562 },
+            "30": { "40": 29.250, "XS": 28.750 }
+        };
+
+        const FITTINGS_LD = {
+            "Elbow 90 LR": 14, "Elbow 90 SR": 20, "Elbow 45": 8, "Tee (Flow Through)": 20, "Tee (Branch)": 60,
+            "Gate Valve": 8, "Globe Valve": 340, "Check Valve (Swing)": 100, "Check Valve (Lift)": 600, 
+            "Butterfly Valve": 45, "Ball Valve (Full Port)": 3, "Ball Valve (Reduced)": 25,
+            "Plug Valve": 18, "Angle Valve": 150, "Strainer (Y-Type)": 50,
+            "Flow Element (Orifice)": 100, "Restriction Orifice": 300, "Custom/Other": 0 
+        };
+
+        const RegimeVisuals = {
+            Stratified: () => (<svg width="100%" height="100%" viewBox="0 0 200 60" preserveAspectRatio="none"><rect x="0" y="0" width="200" height="60" fill="#f8fafc" stroke="#334155" strokeWidth="2" /><path d="M0 40 Q 50 42 100 40 T 200 40 L 200 60 L 0 60 Z" fill="#3b82f6" opacity="0.6" /><text x="100" y="25" textAnchor="middle" fontSize="12" fill="#64748b">GAS</text><text x="100" y="52" textAnchor="middle" fontSize="12" fill="#1e3a8a">LIQUID</text></svg>),
+            Slug: () => (<svg width="100%" height="100%" viewBox="0 0 200 60" preserveAspectRatio="none"><rect x="0" y="0" width="200" height="60" fill="#f8fafc" stroke="#334155" strokeWidth="2" /><rect x="0" y="40" width="200" height="20" fill="#3b82f6" opacity="0.6" /><rect x="40" y="10" width="30" height="50" rx="5" fill="#3b82f6" opacity="0.8" /><rect x="140" y="10" width="30" height="50" rx="5" fill="#3b82f6" opacity="0.8" /><text x="100" y="35" textAnchor="middle" fontSize="12" fill="#ef4444" fontWeight="bold">SLUGGING</text></svg>),
+            Bubble: () => (<svg width="100%" height="100%" viewBox="0 0 200 60" preserveAspectRatio="none"><rect x="0" y="0" width="200" height="60" fill="#3b82f6" opacity="0.3" stroke="#334155" strokeWidth="2" />{[10,30,50,70,90,110,130,150,170,190].map(cx => (<circle key={cx} cx={cx} cy={20 + Math.random()*20} r={4} fill="white" stroke="#3b82f6" />))}<text x="100" y="35" textAnchor="middle" fontSize="12" fill="#1e3a8a" fontWeight="bold">BUBBLE FLOW</text></svg>),
+            Annular: () => (<svg width="100%" height="100%" viewBox="0 0 200 60" preserveAspectRatio="none"><rect x="0" y="0" width="200" height="60" fill="#f8fafc" stroke="#334155" strokeWidth="2" /><rect x="0" y="0" width="200" height="10" fill="#3b82f6" opacity="0.6" /><rect x="0" y="50" width="200" height="10" fill="#3b82f6" opacity="0.6" /><line x1="0" y1="30" x2="200" y2="30" stroke="#94a3b8" strokeDasharray="5,5" /><text x="100" y="35" textAnchor="middle" fontSize="12" fill="#64748b">GAS CORE</text></svg>),
+            Mist: () => (<svg width="100%" height="100%" viewBox="0 0 200 60" preserveAspectRatio="none"><rect x="0" y="0" width="200" height="60" fill="#f8fafc" stroke="#334155" strokeWidth="2" />{[...Array(50)].map((_,i) => (<circle key={i} cx={Math.random()*200} cy={Math.random()*60} r={1} fill="#3b82f6" />))}<text x="100" y="35" textAnchor="middle" fontSize="12" fill="#64748b">MIST FLOW</text></svg>)
+        };
+
+        // --- MATH FUNCTIONS ---
+        const calculateChurchill = (Re, roughness_ft, D_ft) => {
+            if (Re < 1) return 0.01;
+            const relRough = roughness_ft / D_ft;
+            const A = Math.pow(-2.457 * Math.log(Math.pow(7 / Re, 0.9) + 0.27 * relRough), 16);
+            const B = Math.pow(37530 / Re, 16);
+            return 8 * Math.pow(Math.pow(8 / Re, 12) + 1 / Math.pow(A + B, 1.5), 1/12);
+        };
+        const calculateDarcyDP = (f, L, D_ft, rho, v) => (f * (L / D_ft) * (Math.pow(v, 2) / 64.348) * rho) / 144;
+
+        // Taitel-Dukler Prediction (Visuals)
+        const predictFlowRegime = (v_sl, v_sg) => {
+            const v_mix = v_sl + v_sg;
+            const liquidFrac = v_sl / v_mix;
+            if (v_sg > 50) return "Mist";
+            if (v_sg > 20 && v_sl < 5) return "Annular";
+            if (liquidFrac > 0.9 || (v_sl > 10 && v_sg < 2)) return "Bubble";
+            if (v_sg < 10 && v_sl < 1) return "Stratified";
+            return "Slug";
+        };
+
+        // --- BEGGS-BRILL METHOD (1973) ---
+        const calculateBeggsBrill = (v_sl, v_sg, rho_L, rho_G, mu_L, mu_G, D_ft, L_ft, roughness_ft) => {
+            const g = 32.174;
+            const v_m = v_sl + v_sg;
+            const lambda_L = v_sl / v_m; // Input Liquid Fraction
+            const N_Fr = (v_m * v_m) / (g * D_ft); // Froude Number
+            
+            // Calculate Transitions
+            const L1 = 316 * Math.pow(lambda_L, 0.302);
+            const L2 = 0.0009252 * Math.pow(lambda_L, -2.4684);
+            const L3 = 0.1 * Math.pow(lambda_L, -1.4516);
+            const L4 = 0.5 * Math.pow(lambda_L, -6.738);
+
+            let regime = "Segregated";
+            if (lambda_L < 0.01 && N_Fr < L1) regime = "Segregated";
+            else if (lambda_L >= 0.01 && N_Fr < L2) regime = "Segregated";
+            else if (lambda_L >= 0.01 && L2 <= N_Fr && N_Fr <= L3) regime = "Transition";
+            else if ((0.01 <= lambda_L && lambda_L < 0.4 && L3 < N_Fr && N_Fr <= L1) || (lambda_L >= 0.4 && L3 < N_Fr && N_Fr <= L4)) regime = "Intermittent";
+            else if ((lambda_L < 0.4 && N_Fr >= L1) || (lambda_L >= 0.4 && N_Fr > L4)) regime = "Distributed";
+
+            // Calculate Base Liquid Holdup H_L(0)
+            let a, b, c;
+            if (regime === "Segregated") { a=0.98; b=0.4846; c=0.0868; }
+            else if (regime === "Intermittent") { a=0.845; b=0.5351; c=0.0173; }
+            else if (regime === "Distributed") { a=1.065; b=0.5824; c=0.0609; }
+            else { 
+                // Transition: Weighted average of Segregated and Intermittent
+                // Simplified for this tool: assume Intermittent coeffs as conservative
+                a=0.845; b=0.5351; c=0.0173; 
+            }
+
+            // H_L calculation
+            let H_L = a * Math.pow(lambda_L, b) / Math.pow(N_Fr, c);
+            if(H_L > 1) H_L = 1; if(H_L < 0) H_L = 0; // Clamp
+
+            // Friction Factor Calculation
+            const rho_ns = rho_L * lambda_L + rho_G * (1 - lambda_L); // No-slip density
+            const mu_ns = mu_L * lambda_L + mu_G * (1 - lambda_L);    // No-slip viscosity
+            const Re_ns = (rho_ns * v_m * D_ft) / (mu_ns * 0.000672); // No-slip Reynolds
+            
+            // Churchill for No-Slip f
+            const f_ns = calculateChurchill(Re_ns, roughness_ft, D_ft); 
+
+            // Two-Phase Friction Multiplier
+            const y = lambda_L / (H_L * H_L); // Parameter y
+            let S = 0;
+            if (y > 1 && y < 1.2) S = Math.log(2.2 * y - 1.2);
+            else S = Math.log(y) / (-0.0523 + 3.182 * Math.log(y) - 0.8725 * Math.pow(Math.log(y), 2) + 0.01853 * Math.pow(Math.log(y), 4));
+            
+            const f_tp = f_ns * Math.exp(S);
+
+            // Pressure Drop (Horizontal, ignore elevation term)
+            // dP = (2 * f_tp * rho_ns * v_m^2 * L) / (D * gc) -- Note: Beggs Brill uses rho_ns for friction term in horizontal
+            // Careful: Some versions use rho_tp = rho_L*H_L + ... for the acceleration/gravity terms. 
+            // For horizontal friction, Beggs-Brill uses a formulation that simplifies:
+            
+            const dP_psi = (2 * f_tp * rho_ns * Math.pow(v_m, 2) * L_ft) / (32.174 * D_ft * 144);
+
+            return { dP: dP_psi, regime: regime, H_L: H_L };
+        };
+
+        // --- TOOLTIP COMPONENT ---
+        const Tooltip = ({ title, children }) => (
+            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 w-64 p-3 bg-slate-800 text-white text-xs rounded shadow-2xl opacity-0 group-hover:opacity-100 group-hover:visible invisible transition-all z-[100] border border-slate-600 pointer-events-auto">
+                <div className="font-bold border-b border-slate-600 pb-1 mb-1 text-yellow-400">{title}</div>
+                <div className="leading-relaxed text-slate-200">{children}</div>
+                <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-[1px] border-8 border-transparent border-t-slate-800"></div>
+            </div>
+        );
+
+        function App() {
+            const [mode, setMode] = useState("1-Phase");
+            const [calcMethod, setCalcMethod] = useState("L-M"); // "L-M" or "B-B"
+            const [fluidType, setFluidType] = useState("Liquid");
+            const [service, setService] = useState("General Liquid");
+            
+            const [docInfo, setDocInfo] = useState({ lineNo: "", pidNo: "" });
+
+            const [fluid, setFluid] = useState({
+                pressure_psig: 100,
+                rho_liq: 62.4, mu_liq: 1.0, flow_liq: 50000,
+                rho_gas: 0.5, mu_gas: 0.015, flow_gas: 2000, k: 1.4
+            });
+            const [pipeSel, setPipeSel] = useState({ size: "4", sch: "40", roughness: 0.0018 }); 
+            const [segments, setSegments] = useState([{ id: 1, type: "Pipe", length: 100, count: 1, customLe: 0 }]);
+            const [results, setResults] = useState(null);
+            const [warnings, setWarnings] = useState([]);
+            const [cases, setCases] = useState([]);
+
+            const availableServices = useMemo(() => {
+                return Object.keys(GUIDELINES).filter(key => {
+                    const type = GUIDELINES[key].type;
+                    if (mode === "2-Phase") return type === "Mix";
+                    if (mode === "1-Phase") return type === (fluidType === "Liquid" ? "Liquid" : "Gas");
+                    return true;
+                });
+            }, [mode, fluidType]);
+
+            useEffect(() => {
+                if (!availableServices.includes(service)) setService(availableServices[0]);
+            }, [availableServices]);
+
+            useEffect(() => { calculateHydraulics(); }, [fluid, fluidType, pipeSel, segments, mode, service, calcMethod]);
+
+            const calculateHydraulics = () => {
+                const ID_inch = PIPE_DATA[pipeSel.size][pipeSel.sch];
+                if (!ID_inch) return;
+                const ID_ft = ID_inch / 12;
+                const Area_ft2 = (Math.PI / 4) * Math.pow(ID_ft, 2);
+                const roughness_ft = pipeSel.roughness / 12;
+
+                let totalLe_ft = 0;
+                segments.forEach(seg => {
+                    if (seg.type === "Pipe") totalLe_ft += parseFloat(seg.length);
+                    else if (seg.type === "Custom/Other") totalLe_ft += (parseFloat(seg.customLe) || 0) * seg.count;
+                    else totalLe_ft += (FITTINGS_LD[seg.type] || 0) * ID_ft * seg.count;
+                });
+
+                let res = {}, diag = [];
+                const limits = GUIDELINES[service] || GUIDELINES["General Liquid"];
+
+                // SINGLE PHASE
+                if (mode === "1-Phase") {
+                    let rho, mu_cP, flow_lbhr, k;
+                    if (fluidType === "Liquid") {
+                        rho = fluid.rho_liq; mu_cP = fluid.mu_liq; flow_lbhr = fluid.flow_liq;
+                    } else {
+                        rho = fluid.rho_gas; mu_cP = fluid.mu_gas; flow_lbhr = fluid.flow_gas; k = fluid.k;
+                    }
+
+                    const flow_lbs = flow_lbhr / 3600;
+                    const v_fts = flow_lbs / (rho * Area_ft2);
+                    const Re = (rho * v_fts * ID_ft) / (mu_cP * 0.000672);
+                    const f = calculateChurchill(Re, roughness_ft, ID_ft);
+                    const dP_total = calculateDarcyDP(f, totalLe_ft, ID_ft, rho, v_fts);
+                    const dP_100 = calculateDarcyDP(f, 100, ID_ft, rho, v_fts);
+                    const Ve_limit = 100 / Math.sqrt(rho); 
+                    const rho_v2 = rho * Math.pow(v_fts, 2);
+
+                    let mach = 0, c = 0;
+                    if (fluidType === "Gas") {
+                        const P_abs = fluid.pressure_psig + 14.7;
+                        c = Math.sqrt((k * (P_abs * 144) * 32.174) / rho);
+                        mach = v_fts / c;
+                    }
+                    res = { v: v_fts, Re, f, dP_total, dP_100, type: fluidType, mach, sonicVel: c, rho, rho_v2, Ve_limit, method: "Darcy-Weisbach" };
+                } 
+                // TWO PHASE
+                else {
+                    const flow_liq_lbs = fluid.flow_liq / 3600;
+                    const flow_gas_lbs = fluid.flow_gas / 3600;
+                    const v_sl = flow_liq_lbs / (fluid.rho_liq * Area_ft2);
+                    const v_sg = flow_gas_lbs / (fluid.rho_gas * Area_ft2);
+                    const v_mix = v_sl + v_sg;
+                    const total_flow = flow_liq_lbs + flow_gas_lbs;
+                    const rho_mix = (fluid.rho_liq * (fluid.flow_liq/total_flow)) + (fluid.rho_gas * (fluid.flow_gas/total_flow));
+                    const Ve_limit = 100 / Math.sqrt(rho_mix);
+                    const rho_v2 = rho_mix * Math.pow(v_mix, 2);
+                    
+                    // Taitel-Dukler Visual Regime (Always used for the image)
+                    const regimeName = predictFlowRegime(v_sl, v_sg);
+
+                    let dP_TP = 0, dP_TP_100 = 0, usedMethod = "";
+
+                    if (calcMethod === "L-M") {
+                        // Lockhart Martinelli
+                        const f_l = calculateChurchill((fluid.rho_liq * v_sl * ID_ft)/(fluid.mu_liq*0.000672), roughness_ft, ID_ft);
+                        const f_g = calculateChurchill((fluid.rho_gas * v_sg * ID_ft)/(fluid.mu_gas*0.000672), roughness_ft, ID_ft);
+                        const dP_L = calculateDarcyDP(f_l, totalLe_ft, ID_ft, fluid.rho_liq, v_sl);
+                        const dP_G = calculateDarcyDP(f_g, totalLe_ft, ID_ft, fluid.rho_gas, v_sg);
+                        const X = Math.sqrt(dP_L / dP_G);
+                        const C = 20; 
+                        const phi_L2 = 1 + (C / X) + (1 / (X*X));
+                        dP_TP = dP_L * phi_L2;
+                        dP_TP_100 = (dP_L * (100/totalLe_ft)) * phi_L2;
+                        usedMethod = "Lockhart-Martinelli";
+                    } else {
+                        // Beggs-Brill
+                        const bb = calculateBeggsBrill(v_sl, v_sg, fluid.rho_liq, fluid.rho_gas, fluid.mu_liq, fluid.mu_gas, ID_ft, totalLe_ft, roughness_ft);
+                        dP_TP = bb.dP;
+                        const bb100 = calculateBeggsBrill(v_sl, v_sg, fluid.rho_liq, fluid.rho_gas, fluid.mu_liq, fluid.mu_gas, ID_ft, 100, roughness_ft);
+                        dP_TP_100 = bb100.dP;
+                        usedMethod = `Beggs-Brill (${bb.regime})`;
+                    }
+
+                    res = { 
+                        v: v_mix, Re: 0, f: 0, dP_total: dP_TP, dP_100: dP_TP_100, 
+                        type: "Mix", mach: 0, sonicVel: 0, rho: rho_mix, rho_v2, Ve_limit,
+                        regime: regimeName, method: usedMethod
+                    };
+                }
+
+                if (res.v > limits.max_v) diag.push({ level: "red", title: "High Velocity", msg: `> ${limits.max_v} ft/s` });
+                if (res.v < limits.min_v && res.v > 0) diag.push({ level: "orange", title: "Low Velocity", msg: `< ${limits.min_v} ft/s` });
+                if (res.dP_100 > limits.max_dp) diag.push({ level: "red", title: "High dP/100ft", msg: `> ${limits.max_dp} psi` });
+                if (res.v > res.Ve_limit) diag.push({ level: "red", title: "Erosional Vel", msg: `> API Limit` });
+                if (mode === "2-Phase" && res.regime === "Slug") diag.push({ level: "red", title: "SLUG FLOW", msg: "Severe vibration risk" });
+                if (fluidType === "Gas" || mode === "2-Phase") {
+                    if (res.rho_v2 >= 4000) diag.push({ level: "red", title: "Vibration", msg: "ρv² > 4000" });
+                    else if (res.rho_v2 > 1000) diag.push({ level: "orange", title: "Vibration", msg: "ρv² > 1000" });
+                    if (res.mach >= 1.0) diag.push({ level: "red", title: "Choked", msg: "Mach ≥ 1.0" });
+                    else if (res.mach > 0.5) diag.push({ level: "orange", title: "Noise", msg: "Mach > 0.5" });
+                }
+
+                setResults(res);
+                setWarnings(diag);
+            };
+
+            const addSegment = (type) => setSegments([...segments, { id: Date.now(), type, length: 10, count: 1, customLe: 0 }]);
+            const removeSegment = (id) => setSegments(segments.filter(s => s.id !== id));
+            
+            const saveCase = () => { 
+                if(!results) return; 
+                const limit = GUIDELINES[service];
+                const warningText = warnings.length > 0 ? warnings.map(w => `${w.title}`).join("; ") : "OK";
+                setCases([...cases, { 
+                    id: cases.length + 1, 
+                    lineNo: docInfo.lineNo || "-",
+                    pidNo: docInfo.pidNo || "-",
+                    desc: `${service} - ${pipeSel.size}" Sch ${pipeSel.sch}`, 
+                    type: mode === "1-Phase" ? fluidType : "Two-Phase",
+                    method: results.method,
+                    dP_Total: results.dP_total.toFixed(3), 
+                    dP_100: results.dP_100.toFixed(3),
+                    dP_Limit: `< ${limit.max_dp}`,
+                    velocity: results.v.toFixed(2), 
+                    vel_Limit: `${limit.min_v} - ${limit.max_v}`,
+                    reference: limit.src,
+                    warnings: warningText
+                }]); 
+            };
+            
+            const exportExcel = () => { 
+                const data = cases.map(c => ({
+                    "Line Number": c.lineNo,
+                    "P&ID Number": c.pidNo,
+                    "Description": c.desc,
+                    "Fluid State": c.type,
+                    "Calc Method": c.method,
+                    "Velocity (ft/s)": c.velocity,
+                    "Allowed Vel Range": c.vel_Limit,
+                    "Total dP (psi)": c.dP_Total,
+                    "dP per 100ft": c.dP_100,
+                    "dP Limit (psi/100)": c.dP_Limit,
+                    "Reference Standard": c.reference,
+                    "Diagnostics": c.warnings
+                }));
+                const ws = XLSX.utils.json_to_sheet(data); 
+                const wb = XLSX.utils.book_new(); 
+                XLSX.utils.book_append_sheet(wb, ws, "Hydraulic Audit"); 
+                XLSX.writeFile(wb, "Hydraulic_Report.xlsx"); 
+            };
+
+            const renderVisualizer = () => {
+                let x = 10, y = 30, elements = [];
+                segments.forEach((seg, i) => {
+                    if (seg.type === "Pipe") {
+                        const lenScale = Math.min(parseFloat(seg.length) * 1.5, 80); 
+                        elements.push(<line key={i} x1={x} y1={y} x2={x+lenScale} y2={y} stroke="#3b82f6" strokeWidth="4" />);
+                        x += lenScale;
+                    } else {
+                        elements.push(<circle key={i} cx={x+10} cy={y} r="6" fill="#ef4444" />);
+                        x += 20;
+                    }
+                });
+                return <svg width="100%" height="60" className="bg-slate-50 border rounded mt-4 overflow-hidden">{elements}</svg>;
+            };
+
+            const limits = GUIDELINES[service] || {};
+
+            return (
+                <div className="container mx-auto p-4 max-w-6xl pb-20">
+                    <header className="mb-6 flex flex-col md:flex-row justify-between items-center gap-4 bg-white p-4 rounded-lg shadow-sm border border-slate-200">
+                        <div>
+                            <h1 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                                <span className="text-blue-600 text-2xl">⚡</span> Process Hydraulic Tool
+                            </h1>
+                            <p className="text-slate-500 text-xs">GPSA / API 14E / Flow Maps</p>
+                        </div>
+                        <div className="flex gap-2">
+                            <button onClick={() => setMode("1-Phase")} className={`px-4 py-2 rounded font-medium text-xs transition ${mode==="1-Phase" ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'}`}>Single Phase</button>
+                            <button onClick={() => setMode("2-Phase")} className={`px-4 py-2 rounded font-medium text-xs transition ${mode==="2-Phase" ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'}`}>Two Phase</button>
+                        </div>
+                    </header>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                        
+                        {/* INPUTS */}
+                        <div className="lg:col-span-3 bg-white p-5 rounded-lg shadow-sm border border-slate-200 h-fit space-y-6">
+                            
+                            {/* DOCUMENTATION INFO */}
+                            <div className="space-y-2 border-b pb-4 mb-2">
+                                <div className="input-group">
+                                    <label>Line No.</label>
+                                    <input type="text" value={docInfo.lineNo} onChange={e => setDocInfo({...docInfo, lineNo: e.target.value})} placeholder="e.g. 10-PG-1001" />
+                                </div>
+                                <div className="input-group">
+                                    <label>P&ID No.</label>
+                                    <input type="text" value={docInfo.pidNo} onChange={e => setDocInfo({...docInfo, pidNo: e.target.value})} placeholder="e.g. D-100-01" />
+                                </div>
+                            </div>
+
+                            {mode === "1-Phase" && (
+                                <div className="mb-2">
+                                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wide block mb-1">Fluid State</label>
+                                    <div className="flex bg-slate-100 p-1 rounded">
+                                        <button onClick={() => setFluidType("Liquid")} className={`flex-1 py-1 text-xs font-semibold rounded transition ${fluidType==="Liquid" ? 'bg-white shadow text-blue-700' : 'text-slate-400'}`}>LIQUID</button>
+                                        <button onClick={() => setFluidType("Gas")} className={`flex-1 py-1 text-xs font-semibold rounded transition ${fluidType==="Gas" ? 'bg-white shadow text-blue-700' : 'text-slate-400'}`}>GAS</button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {mode === "2-Phase" && (
+                                <div className="mb-2">
+                                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wide block mb-1">Calc Method</label>
+                                    <select className="w-full border border-blue-200 rounded p-2 text-sm bg-blue-50 font-medium text-blue-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        value={calcMethod} onChange={e => setCalcMethod(e.target.value)}>
+                                        <option value="L-M">Lockhart-Martinelli (Default)</option>
+                                        <option value="B-B">Beggs-Brill (Advanced)</option>
+                                    </select>
+                                </div>
+                            )}
+
+                            <div>
+                                <label className="text-xs font-bold text-slate-500 uppercase tracking-wide block mb-1">Design Service</label>
+                                <select className="w-full border border-blue-200 rounded p-2 text-sm bg-blue-50 font-medium text-blue-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    value={service} onChange={e => setService(e.target.value)}>
+                                    {availableServices.map(k => <option key={k} value={k}>{k}</option>)}
+                                </select>
+                            </div>
+
+                            <div className="space-y-3">
+                                <h3 className="text-sm font-bold text-slate-700 border-b pb-1">Fluid Data</h3>
+                                <div className="input-group"><label>Pressure (psig)</label><input type="number" value={fluid.pressure_psig} onChange={e => setFluid({...fluid, pressure_psig: parseFloat(e.target.value)})} /></div>
+                                
+                                {(mode === "2-Phase" || (mode === "1-Phase" && fluidType === "Liquid")) && (
+                                    <div className="pl-2 border-l-2 border-blue-200 space-y-2">
+                                        <div className="input-group"><label>Liq Density (lb/ft³)</label><input type="number" value={fluid.rho_liq} onChange={e => setFluid({...fluid, rho_liq: parseFloat(e.target.value)})} /></div>
+                                        <div className="input-group"><label>Liq Viscosity (cP)</label><input type="number" value={fluid.mu_liq} onChange={e => setFluid({...fluid, mu_liq: parseFloat(e.target.value)})} /></div>
+                                        <div className="input-group"><label>Liq Flow (lb/hr)</label><input type="number" value={fluid.flow_liq} onChange={e => setFluid({...fluid, flow_liq: parseFloat(e.target.value)})} /></div>
+                                    </div>
+                                )}
+                                {(mode === "2-Phase" || (mode === "1-Phase" && fluidType === "Gas")) && (
+                                    <div className="pl-2 border-l-2 border-orange-200 space-y-2">
+                                        <div className="input-group"><label>Gas Density (lb/ft³)</label><input type="number" value={fluid.rho_gas} onChange={e => setFluid({...fluid, rho_gas: parseFloat(e.target.value)})} /></div>
+                                        <div className="input-group"><label>Gas Viscosity (cP)</label><input type="number" value={fluid.mu_gas} onChange={e => setFluid({...fluid, mu_gas: parseFloat(e.target.value)})} /></div>
+                                        <div className="input-group"><label>Gas Flow (lb/hr)</label><input type="number" value={fluid.flow_gas} onChange={e => setFluid({...fluid, flow_gas: parseFloat(e.target.value)})} /></div>
+                                        <div className="input-group"><label>Cp/Cv (k)</label><input type="number" step="0.01" value={fluid.k} onChange={e => setFluid({...fluid, k: parseFloat(e.target.value)})} /></div>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="space-y-3 pt-2">
+                                <h3 className="text-sm font-bold text-slate-700 border-b pb-1">Pipe Spec</h3>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <div className="input-group"><label>Size</label><select value={pipeSel.size} onChange={e => setPipeSel({...pipeSel, size: e.target.value})}>{Object.keys(PIPE_DATA).map(s => <option key={s} value={s}>{s}"</option>)}</select></div>
+                                    <div className="input-group"><label>Sch</label><select value={pipeSel.sch} onChange={e => setPipeSel({...pipeSel, sch: e.target.value})}>{Object.keys(PIPE_DATA[pipeSel.size] || {}).map(s => <option key={s} value={s}>{s}</option>)}</select></div>
+                                </div>
+                                <div className="input-group"><label>Roughness (in)</label><input type="number" step="0.0001" value={pipeSel.roughness} onChange={e => setPipeSel({...pipeSel, roughness: parseFloat(e.target.value)})} /></div>
+                            </div>
+                        </div>
+
+                        {/* LINE BUILDER */}
+                        <div className="lg:col-span-5 bg-white p-5 rounded-lg shadow-sm border border-slate-200 h-fit">
+                            <h3 className="font-bold text-slate-700 text-sm mb-2">Add Components</h3>
+                            <div className="space-y-2 mb-4">
+                                <div>
+                                    <div className="text-[10px] uppercase font-bold text-slate-400 mb-1">Standard Fittings</div>
+                                    <div className="flex gap-2 flex-wrap">
+                                        {["Pipe", "Elbow 90 LR", "Tee (Flow Through)", "Tee (Branch)"].map(t => (
+                                            <button key={t} onClick={() => addSegment(t)} className="px-2 py-1 bg-slate-50 hover:bg-slate-100 rounded text-xs border border-slate-300 font-medium text-slate-600 transition">+ {t}</button>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div>
+                                    <div className="text-[10px] uppercase font-bold text-slate-400 mb-1">Valves</div>
+                                    <div className="flex gap-2 flex-wrap">
+                                        {["Ball Valve (Full Port)", "Gate Valve", "Check Valve (Swing)", "Globe Valve", "Butterfly Valve"].map(t => (
+                                            <button key={t} onClick={() => addSegment(t)} className="px-2 py-1 bg-blue-50 hover:bg-blue-100 rounded text-xs border border-blue-200 font-medium text-blue-700 transition">+ {t.replace(" Valve", "")}</button>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div>
+                                    <div className="text-[10px] uppercase font-bold text-slate-400 mb-1">Instruments / Other</div>
+                                    <div className="flex gap-2 flex-wrap">
+                                        {["Strainer (Y-Type)", "Flow Element (Orifice)", "Restriction Orifice", "Custom/Other"].map(t => (
+                                            <button key={t} onClick={() => addSegment(t)} className="px-2 py-1 bg-orange-50 hover:bg-orange-100 rounded text-xs border border-orange-200 font-medium text-orange-700 transition">+ {t}</button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="max-h-[350px] overflow-y-auto pr-1 space-y-2">
+                                {segments.map((seg, idx) => (
+                                    <div key={seg.id} className="flex items-center justify-between bg-white p-2 rounded border border-slate-100 hover:border-blue-200 transition shadow-sm">
+                                        <div className="flex items-center gap-3 flex-1 overflow-hidden">
+                                            <span className="bg-slate-100 text-slate-500 text-[10px] w-5 h-5 flex items-center justify-center rounded-full font-bold">{idx+1}</span>
+                                            <span className="font-medium text-xs text-slate-700 truncate">{seg.type}</span>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            {seg.type === "Pipe" ? (
+                                                <div className="flex items-center gap-1">
+                                                    <span className="text-[10px] text-slate-400">Len:</span>
+                                                    <input type="number" className="w-16 p-1 border rounded text-xs text-right focus:border-blue-500 outline-none" 
+                                                        value={seg.length} onChange={(e) => { const newSegs = [...segments]; newSegs[idx].length = e.target.value; setSegments(newSegs); }} />
+						    <span className="text-[10px] text-slate-400 font-bold">ft</span>
+                                                </div>
+                                            ) : seg.type === "Custom/Other" ? (
+                                                <div className="flex items-center gap-1">
+                                                    <span className="text-[10px] text-slate-400">Eq.Len:</span>
+                                                    <input type="number" className="w-16 p-1 border rounded text-xs text-right focus:border-blue-500 outline-none" 
+                                                        value={seg.customLe} placeholder="ft" onChange={(e) => { const newSegs = [...segments]; newSegs[idx].customLe = e.target.value; setSegments(newSegs); }} />
+                                                </div>
+                                            ) : (
+                                                <div className="flex items-center gap-1">
+                                                    <span className="text-[10px] text-slate-400">Qty:</span>
+                                                    <input type="number" className="w-12 p-1 border rounded text-xs text-right focus:border-blue-500 outline-none" 
+                                                        value={seg.count} onChange={(e) => { const newSegs = [...segments]; newSegs[idx].count = e.target.value; setSegments(newSegs); }} />
+                                                </div>
+                                            )}
+                                            <button onClick={() => removeSegment(seg.id)} className="text-slate-300 hover:text-red-500 ml-1">×</button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                            {renderVisualizer()}
+                        </div>
+
+                        {/* RESULTS */}
+                        <div className="lg:col-span-4 space-y-6">
+                            <div className="bg-white p-5 rounded-lg shadow-lg border border-slate-200 relative overflow-visible z-10">
+                                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-indigo-600"></div>
+                                <h2 className="font-bold text-slate-800 mb-4 flex justify-between items-center">
+                                    Results Preview
+                                    {results && results.mach > 1 && <span className="bg-red-100 text-red-800 px-2 py-0.5 rounded text-xs animate-pulse font-bold">CHOKED</span>}
+                                </h2>
+                                
+                                {results ? (
+                                    <div className="space-y-4">
+                                        
+                                        {/* METHOD INFO */}
+                                        {mode === "2-Phase" && (
+                                            <div className="text-xs text-center text-slate-400 font-mono mb-2 uppercase tracking-wide">
+                                                Using: <span className="text-blue-600 font-bold">{results.method}</span>
+                                            </div>
+                                        )}
+
+                                        <div className="grid grid-cols-2 gap-4">
+                                            {/* METRICS */}
+                                            <div className="group relative bg-slate-50 p-3 rounded border border-slate-100 cursor-help">
+                                                <div className="text-[10px] text-slate-500 uppercase font-bold">Total Pressure Drop</div>
+                                                <div className="text-xl font-bold text-slate-800">{results.dP_total.toFixed(3)} <span className="text-xs font-normal text-slate-500">psi</span></div>
+                                                <Tooltip title="Total System Loss"><p className="mb-2">Sum of frictional loss from pipe and all fittings.</p></Tooltip>
+                                            </div>
+
+                                            <div className={`group relative p-3 rounded border cursor-help ${results.dP_100 > limits.max_dp ? 'bg-red-50 border-red-100' : 'bg-slate-50 border-slate-100'}`}>
+                                                <div className="text-[10px] text-slate-500 uppercase font-bold">Drop / 100ft</div>
+                                                <div className={`text-xl font-bold ${results.dP_100 > limits.max_dp ? 'text-red-700' : 'text-slate-800'}`}>{results.dP_100.toFixed(3)} <span className="text-xs font-normal text-slate-500">psi</span></div>
+                                                <Tooltip title={`Limit for ${service}`}><p className="mb-2">Max Recommended: <span className="font-bold text-yellow-400">{limits.max_dp} psi/100ft</span></p><p className="mb-2 italic">{limits.reason_dp}</p><a href={limits.link} target="_blank" className="text-right text-[10px] text-blue-400 hover:text-blue-300 font-mono block underline">Source: {limits.src}</a></Tooltip>
+                                            </div>
+
+                                            <div className={`group relative p-3 rounded border cursor-help ${warnings.some(w => w.title.includes("Velocity")) ? 'bg-orange-50 border-orange-100' : 'bg-slate-50 border-slate-100'}`}>
+                                                <div className="text-[10px] text-slate-500 uppercase font-bold">Velocity</div>
+                                                <div className="text-xl font-bold text-slate-800">{results.v.toFixed(1)} <span className="text-xs font-normal text-slate-500">ft/s</span></div>
+                                                <Tooltip title={`Limit for ${service}`}><p className="mb-2">Range: <span className="font-bold text-yellow-400">{limits.min_v} - {limits.max_v} ft/s</span></p><p className="mb-2 italic">{limits.reason_v}</p><a href={limits.link} target="_blank" className="text-right text-[10px] text-blue-400 hover:text-blue-300 font-mono block underline">Source: {limits.src}</a></Tooltip>
+                                            </div>
+
+                                            <div className="group relative bg-slate-50 p-3 rounded border border-slate-100 cursor-help">
+                                                <div className="text-[10px] text-slate-500 uppercase font-bold">Reynolds No.</div>
+                                                <div className="text-sm font-mono text-slate-600 mt-1">{results.Re > 0 ? results.Re.toExponential(2) : "N/A"}</div>
+                                                <Tooltip title="Flow Regime"><p>{results.Re < 2100 ? "Laminar" : "Turbulent"}</p></Tooltip>
+                                            </div>
+                                        </div>
+                                        
+                                        {/* DIAGNOSTICS LIST */}
+                                        {warnings.length > 0 && (
+                                            <div className="border-t pt-3">
+                                                <div className="text-[10px] font-bold text-slate-400 mb-2 uppercase">Checks & Warnings</div>
+                                                <div className="space-y-1">
+                                                    {warnings.map((w, i) => (
+                                                        <div key={i} className={`flex items-center gap-2 p-2 rounded text-xs font-medium ${w.level === 'red' ? 'bg-red-50 text-red-700 border border-red-100' : 'bg-orange-50 text-orange-800 border border-orange-100'}`}>
+                                                            <span>⚠️</span> {w.title}: {w.msg}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* VISUAL REGIME RENDERER */}
+                                        {mode === "2-Phase" && results.regime && RegimeVisuals[results.regime] && (
+                                            <div className="mt-4 border-t pt-2">
+                                                <div className="flex justify-between items-center mb-1">
+                                                    <span className="text-xs font-bold text-slate-500">PREDICTED REGIME:</span>
+                                                    <span className={`text-xs font-bold px-2 py-0.5 rounded ${results.regime === "Slug" ? 'bg-red-100 text-red-800' : 'bg-blue-100 text-blue-800'}`}>{results.regime} Flow</span>
+                                                </div>
+                                                <div className="w-full h-16 bg-white border border-slate-200 rounded overflow-hidden">
+                                                    {React.createElement(RegimeVisuals[results.regime])}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        <button onClick={saveCase} className="w-full bg-slate-800 hover:bg-slate-900 text-white font-semibold py-2 rounded text-sm transition shadow-lg mt-2">Save Case</button>
+                                    </div>
+                                ) : <div className="text-center py-10 text-slate-400 text-sm">Enter fluid data to calculate</div>}
+                            </div>
+                            
+                            <div className="bg-white p-5 rounded-lg shadow-sm border border-slate-200 z-0">
+                                <div className="flex justify-between items-center mb-3">
+                                    <h3 className="font-bold text-slate-700 text-sm">Case History</h3>
+                                    {cases.length > 0 && <button onClick={exportExcel} className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded hover:bg-green-200">Download .xlsx</button>}
+                                </div>
+                                <div className="space-y-2 max-h-40 overflow-y-auto">
+                                    {cases.map(c => (
+                                        <div key={c.id} className="text-xs border-b border-slate-100 pb-2 flex justify-between items-center">
+                                            <div className="flex-1">
+                                                <div className="font-semibold text-slate-700">{c.lineNo} ({c.desc})</div>
+                                                <div className="text-slate-400">P&ID: {c.pidNo} | dP: {c.dP_Total} | v: {c.velocity}</div>
+                                            </div>
+                                            <span className={`px-2 py-1 rounded-full text-[10px] font-bold ${c.warnings === 'OK' ? 'bg-green-100 text-green-700' : 'bg-orange-100 text-orange-700'}`}>{c.warnings === 'OK' ? 'OK' : 'CHK'}</span>
+                                        </div>
+                                    ))}
+                                    {cases.length === 0 && <p className="text-xs text-slate-400 text-center">No saved cases yet.</p>}
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
